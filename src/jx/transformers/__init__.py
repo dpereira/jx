@@ -39,4 +39,4 @@ class Folder:
                 obj = self._jx.data 
                 parent = None
                 self._jx.data = {}
-            self._folded[''.join(locator)] = parent, obj
+            self._folded[fold_key] = parent, obj
