@@ -1,4 +1,4 @@
-.PHONY: test
+.PHONY: glossary flat big
 
 glossary:
 	@PYTHONPATH=src/ python src/jx test/json/glossary.json
