@@ -67,12 +67,17 @@ class Jx:
 
     def __enter__(self):
         self._window = curses.initscr()
+        self._init_colors()
         self._window.keypad(True)
         curses.mousemask(curses.ALL_MOUSE_EVENTS)
         curses.noecho()
         init_processors(window=self._window, jx=self)
 
         return self
+
+    def _init_colors(self):
+        curses.start_color()
+        curses.init_pair(1, curses.COLOR_BLUE, curses.COLOR_GREEN)
 
     def __exit__(self, *exception_args):
         curses.endwin()
@@ -82,8 +87,19 @@ class Jx:
         jp = JsonParser()
         self.buffer = jp.print_object(self.data)
         self.index = jp.object_index
+        seen_objects = set()
+
         for i, l in enumerate(self.buffer[0].split('\n')):
-                self._window.addstr('\r{:>15}> {}\n'.format(self.index[i][-1][-1],l))
+            object_rep = json.dumps(self.index[i][1], sort_keys=True)
+            object_name = self.index[i][-1][-1]
+
+            self._window.addstr('\r{:>15}> {}'.format(object_name, l))
+            if object_rep not in seen_objects:
+                seen_objects.add(object_rep)
+                self._window.addstr(' ')
+                self._window.addstr('-', curses.color_pair(1))
+
+            self._window.addstr('\n')
 
     def _trap_events(self):
         curses.cbreak()
