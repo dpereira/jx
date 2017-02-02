@@ -31,20 +31,43 @@ class JsonParser:
         self.object_index[l] = instance, label
         return buffer, l
 
-    def print_object(self, instance, line=0, level=0, previous_i=0, label=['root']):
-        buffer = ''
-        b,line = self._buffer_add(instance, "{", line, inline=True, i=previous_i, label=label)
-        buffer +=  b
+    def _expand_ctx(self, ctx):
+        return (
+            ctx.get('line', 0),
+            ctx.get('level', 0),
+            ctx.get('attribute_index', 0),
+            ctx.get('label', ['root'])
+        )
 
-        i = 0
+    def _new_ctx(self, line, level, attribute_index, label):
+        return {
+            'line': line,
+            'level': level,
+            'attribute_index': attribute_index, 
+            'label': label
+        }
+
+    def print_object(self, instance, ctx={}):
+        line, level, attribute_index, label = self._expand_ctx(ctx)
+        buffer = ''
+        b,line = self._buffer_add(instance, "{", line, inline=True, i=attribute_index, label=label)
+        buffer +=  b
 
         for i, (attr, value) in enumerate(instance.items()):
             b, line = self._buffer_add(instance, '{k}: '.format(k=json.dumps(attr)), line, level + 1, i, label=label)
             buffer += b
             if isinstance(value, dict):
-                o, line = self.print_object(value, line, level + 1, label=label + [attr])
+                child_ctx = self._new_ctx(
+                    line, level + 1, i, label + [attr]
+                )
+                o, line = self.print_object(value, child_ctx)
+                    
             elif isinstance(value, list):
-                o, line = self.print_object({}, line, level + 1, label=label + [attr])
+                # TODO: support lists
+                child_ctx = self._new_ctx(
+                    line, level + 1, i, label + [attr]
+                )
+                o, line = self.print_object({}, child_ctx)
             else:
                 o = json.dumps(value)
 
