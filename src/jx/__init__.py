@@ -8,6 +8,7 @@ import json
 import threading
 import time
 
+from collections import namedtuple
 from processors import init_processors, process
 
 version = '0.1'
@@ -19,65 +20,195 @@ class JsonLoader:
             self.json = f.read()
             self.data = json.loads(self.json)
 
-class JsonParser:
+class ParseException(Exception):
+    pass
 
-    object_index = {}
 
-    def _buffer_add(self, instance, text, line=0, level=0, i=0, inline=False, label=['root'], exc=False):
-        buffer = ',' if i  else ''
-        buffer += '' if inline else '\n' + ('\t' * level)
-        buffer += text
-        l = line + (0 if inline and not exc else 1)
-        self.object_index[l] = instance, label
-        return buffer, l
+class TokenParser:
+
+    token_names = [
+        'OBJECT',
+        'OBJ_OPEN',
+        'OBJ_CLOSE',
+        'LIST',
+        'LIST_OPEN',
+        'LIST_CLOSE',
+        'KEY',
+        'VALUE',
+        'KEY_AND_VALUE',
+        'KEY_AND_VALUE_SEPARATOR',
+        'ROOT'
+    ]
+
+    tokens = namedtuple('Tokens', token_names)._make(token_names)
+
+    def get_parser(self, token):
+        return {
+            self.tokens.OBJECT: JsonParser(),
+            self.tokens.OBJ_OPEN: ConstantFragment('{'),
+            self.tokens.OBJ_CLOSE: ConstantFragment('}'),
+            self.tokens.LIST: DefaultParser(),
+            self.tokens.LIST_OPEN: ConstantFragment('['),
+            self.tokens.LIST_CLOSE: ConstantFragment(']'),
+            self.tokens.KEY_AND_VALUE: KeyAndValueParser(),
+            self.tokens.KEY_AND_VALUE_SEPARATOR: ConstantFragment(': '),
+            self.tokens.KEY: DefaultParser(),
+            self.tokens.VALUE: DefaultParser(),
+        }[token]
 
     def _expand_ctx(self, ctx):
         return (
             ctx.get('line', 0),
             ctx.get('level', 0),
             ctx.get('attribute_index', 0),
-            ctx.get('label', ['root'])
+            ctx.get('label', ['root']),
+            ctx.get('inline', False)
         )
 
-    def _new_ctx(self, line, level, attribute_index, label):
+    def _new_ctx(self, line=0, level=0, attribute_index=0, label=['root'], inline=False, object_index={}):
         return {
             'line': line,
             'level': level,
             'attribute_index': attribute_index, 
-            'label': label
+            'label': label,
+            'inline': inline,
+            'object_index': object_index
         }
 
-    def print_object(self, instance, ctx={}):
-        line, level, attribute_index, label = self._expand_ctx(ctx)
-        buffer = ''
-        b,line = self._buffer_add(instance, "{", line, inline=True, i=attribute_index, label=label)
-        buffer +=  b
 
-        for i, (attr, value) in enumerate(instance.items()):
-            b, line = self._buffer_add(instance, '{k}: '.format(k=json.dumps(attr)), line, level + 1, i, label=label)
-            buffer += b
-            if isinstance(value, dict):
-                child_ctx = self._new_ctx(
-                    line, level + 1, i, label + [attr]
-                )
-                o, line = self.print_object(value, child_ctx)
-                    
-            elif isinstance(value, list):
-                # TODO: support lists
-                child_ctx = self._new_ctx(
-                    line, level + 1, i, label + [attr]
-                )
-                o, line = self.print_object({}, child_ctx)
-            else:
-                o = json.dumps(value)
+    def emit(self, instance, ctx, token):
+        try:
+            parser = self.get_parser(token)
+        except KeyError as k:
+            raise ParseException('{p} is not a valid token'.format(p=k))
 
-            b, line = self._buffer_add(instance, o, line, level + 1, i=0, inline=True, label=label)
-            buffer += b
+        try:
+            child_ctx = dict(ctx)
+            fragment = parser.parse(instance, child_ctx)
+            return fragment, child_ctx
+        except Exception as e:
+            raise
+            #raise ParseException('Error parsing {t}: {te}, {e}'.format(t=token, te=type(e), e=e))
 
-        b, line = self._buffer_add(instance, "}", line, level, 0, inline=(len(instance)==0), exc=True, label=label)
-        buffer += b
+    def parse(self, instance, ctx):
+        return (
+            self.parse_before(instance, ctx) +
+            self.parse_token(instance, ctx) +
+            self.parse_after(instance, ctx)
+        )
 
-        return buffer, line
+    def parse_token(self, instance, ctx):
+        raise NotImplementedError('"parse" method implementation is required')
+
+    def parse_before(self, instance, ctx):
+        line, level, attribute_index, label, inline = self._expand_ctx(ctx)
+        fragment = ',' if attribute_index  else ''
+        fragment += '' if inline else '\n' + ('\t' * level)
+        return fragment
+
+    def parse_after(self, instance, ctx):
+        ctx['line'] = self.line_number(instance, ctx)
+        ctx['object_index'][ctx['line']] = instance, ctx['label']
+        return ''
+
+    def line_number(self, instance, ctx):
+        return ctx['line'] + 1
+
+class DefaultParser(TokenParser):
+
+    def parse_token(self, key, ctx):
+        return json.dumps(key)
+
+class ConstantFragment(TokenParser):
+
+    def __init__(self, fragment):
+        self._fragment = fragment
+
+    def parse_before(self, instance, ctx):
+        return ''
+
+    def line_number(self, instance, ctx):
+        return ctx['line']
+
+    def parse_token(self, instance, ctx):
+        return self._fragment
+
+class KeyAndValueParser(TokenParser):
+
+    def parse_token(self, instance, ctx):
+        key, value = instance
+        key_fragment, ctx = self.emit(key, ctx, self.tokens.KEY)
+        key_value_separator_fragment, ctx = self.emit(instance, ctx, self.tokens.KEY_AND_VALUE_SEPARATOR)
+
+        if isinstance(value, dict):
+            token = self.tokens.OBJECT
+        elif isinstance(value, list):
+            token = self.tokens.LIST
+        else:
+            token = self.tokens.VALUE
+
+        value_fragment, ctx = self.emit(value, ctx, token)
+
+        return '"{k}"{s} "{v}" '.format(
+            k=key_fragment,
+            s=key_value_separator_fragment,
+            v=value_fragment
+        )
+
+class JsonParser(TokenParser):
+
+    object_index = {}
+
+    def _buffer_add(self, instance, text, line=0, level=0, i=0, inline=False, label=['root'], exc=False):
+        buffer = text
+        return buffer, l
+
+    def parse_before(self, instance, ctx):
+        return '' 
+
+    def parse_token(self, instance, ctx):
+        fragment, ctx = self.emit(instance, ctx, self.tokens.OBJ_OPEN)
+
+        for attribute_index, key_and_value in enumerate(instance.items()):
+            ctx['attribute_index'] = attribute_index
+            key_and_value_fragment, ctx = self.emit(key_and_value, ctx, self.tokens.KEY_AND_VALUE)
+            fragment += key_and_value_fragment
+
+        closure_fragment, ctx = self.emit(instance, ctx, self.tokens.OBJ_CLOSE)
+
+        return fragment + closure_fragment
+
+    def print_object(self, instance, ctx=None):
+        return self.parse_token(instance, ctx if ctx else self._new_ctx(object_index=self.object_index))
+#        line, level, attribute_index, label, inline = self._expand_ctx(ctx)
+#        buffer = ''
+#        b,line = self._buffer_add(instance, "{", line, inline=True, i=attribute_index, label=label)
+#        buffer +=  b
+#
+#        for i, (attr, value) in enumerate(instance.items()):
+#            b, line = self._buffer_add(instance, , line, level + 1, i, label=label)
+#            buffer += '{k}: '.format(k=json.dumps(attr))
+#            if isinstance(value, dict):
+#                child_ctx = self._new_ctx(
+#                    line, level + 1, i, label + [attr]
+#                )
+#                o, line = self.print_object(value, child_ctx)
+#            elif isinstance(value, list):
+#                # TODO: support lists
+#                child_ctx = self._new_ctx(
+#                    line, level + 1, i, label + [attr]
+#                )
+#                o, line = self.print_object({}, child_ctx)
+#            else:
+#                o = json.dumps(value)
+#
+#            b, line = self._buffer_add(instance, o, line, level + 1, i=0, inline=True, label=label)
+#            buffer += b
+#
+#        b, line = self._buffer_add(instance, "}", line, level, 0, inline=(len(instance)==0), exc=True, label=label)
+#        buffer += b
+#
+#        return buffer, line
 
 
 class Jx:
